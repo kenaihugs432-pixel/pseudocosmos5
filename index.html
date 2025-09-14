@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AR com WebXR — pseudocosmos (fix v2)</title>
+  <title>AR com WebXR — pseudocosmos (no-anim)</title>
   <style>
     body{margin:0;overflow:hidden;font-family:sans-serif;background:#000;color:#fff}
     #message{position:fixed;left:10px;top:10px;z-index:20;background:#fff;color:#000;padding:8px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);max-width:calc(100% - 24px)}
@@ -57,9 +57,11 @@
     }
     const { GLTFLoader } = GLTFLoaderModule;
     const { ARButton } = ARButtonModule;
+
+    // detectar export do SkeletonUtils de forma robusta:
     let SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
     if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) {
-      console.warn('SkeletonUtils não exportado na forma esperada — fallback para clone simples (pode quebrar skinned animation).');
+      console.warn('SkeletonUtils não exportado na forma esperada — fallback para clone simples (pode afetar skinned objects).');
       SkeletonUtils = null;
     }
 
@@ -83,13 +85,12 @@
     scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
     const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(1,2,1); scene.add(dir);
 
-    // reticle - vou usar decomposição para posição/quaternion
+    // reticle - usamos decomposição para posição/quaternion
     const ring = new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI/2);
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
     const reticle = new THREE.Mesh(ring, ringMat);
     reticle.matrixAutoUpdate = false;
     reticle.visible = false;
-    // adicionar atributos de transformação que vamos preencher via decompose
     reticle.position.set(0,0,0);
     reticle.quaternion.set(0,0,0,1);
     reticle.scale.set(1,1,1);
@@ -138,7 +139,7 @@
         }
       });
 
-      console.log('Modelo carregado — animações:', gltf.animations.length, gltf.animations.map(a=>a.name));
+      console.log('Modelo carregado — animações no arquivo:', (gltf.animations && gltf.animations.length) || 0);
       modelReady = true;
       setMessage('Modelo carregado. Clique em "START AR" para dar início à realidade aumentada. Aponte a câmera para o anel verde e toque para posicionar.');
     }, undefined, (err) => {
@@ -182,25 +183,18 @@
       catch(e) { showError('Erro criando botão AR: ' + e); }
     }
 
-    // mixers/clock
-    const mixers = [];
-    const clock = new THREE.Clock();
-
     // controller
     const controller = renderer.xr.getController(0);
 
     // --- HIT TEST: quando houver resultados, seto reticle.matrix, decomponho e atualizo reticle.position/quaternion/scale
     const tmpMatrix = new THREE.Matrix4();
     renderer.setAnimationLoop((timestamp, frame) => {
-      const delta = clock.getDelta();
-      for (const mm of mixers) mm.update(delta);
-
+      // NOTE: removi clock/mixers/animacao (não usamos animações)
       if (frame) {
         const session = renderer.xr.getSession();
         const referenceSpace = renderer.xr.getReferenceSpace();
         if (session && !session._hitTestSourceRequested) {
           session._hitTestSourceRequested = true;
-          // pedimos viewer space para o hit test, conforme exemplos
           session.requestReferenceSpace('viewer').then(viewerSpace => {
             session.requestHitTestSource({ space: viewerSpace }).then(src => session._hitTestSource = src)
               .catch(e => console.warn('requestHitTestSource failed', e));
@@ -213,14 +207,10 @@
             const hit = results[0];
             const pose = hit.getPose(referenceSpace);
             if (pose) {
-              // preenche a matrix do reticle com a transform do hit
               tmpMatrix.fromArray(pose.transform.matrix);
-              // atualiza a matrix do reticle
               reticle.matrix.copy(tmpMatrix);
-              // decomponha para posição/quaternion/escala no espaço do Three.js
               reticle.matrix.decompose(reticle.position, reticle.quaternion, reticle.scale);
               reticle.visible = true;
-              // garante que world matrix está atualizada
               reticle.updateMatrixWorld(true);
             } else {
               reticle.visible = false;
@@ -232,20 +222,18 @@
       renderer.render(scene, camera);
     });
 
-    // --- SELECT: use position/quaternion do reticle para posicionar o modelo no mundo
+    // --- SELECT: posiciona o modelo usando position/quaternion do reticle (sem animações)
     controller.addEventListener('select', () => {
       if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
       if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
 
       try {
         if (placedModel) {
-          // Reposiciona usando posição/quaternion do reticle (mantendo transformações consistentes)
           placedModel.position.copy(reticle.position);
           placedModel.quaternion.copy(reticle.quaternion);
           placedModel.scale.copy(reticle.scale);
           placedModel.updateMatrixWorld(true);
           console.log('Modelo existente reposicionado.');
-          // debug: mostra posições world do modelo e da câmera
           console.log('DEBUG model world pos:', new THREE.Vector3().setFromMatrixPosition(placedModel.matrixWorld));
           console.log('DEBUG camera world pos:', new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
           console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
@@ -253,28 +241,17 @@
         }
 
         const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
-
-        // importante: coloque como filho da cena (nunca do controller ou camera)
         scene.add(clone);
 
-        // agora copie posição/quaternion/escala do reticle
         clone.position.copy(reticle.position);
         clone.quaternion.copy(reticle.quaternion);
         clone.scale.copy(reticle.scale);
-        // deixe matrixAutoUpdate = true (padrão) para evitar problemas de referência; atualize world matrix
         clone.matrixAutoUpdate = true;
         clone.updateMatrixWorld(true);
 
         placedModel = clone;
 
-        if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
-          const m = new THREE.AnimationMixer(clone);
-          baseGLTF.animations.forEach(clip => m.clipAction(clip).play());
-          mixers.push(m);
-          console.log('Clone adicionado e animação iniciada (mixers=', mixers.length, ')');
-        } else console.log('Clone adicionado (sem animações).');
-
-        // debug: checar posições
+        console.log('Clone adicionado (sem animações).');
         console.log('DEBUG placedModel world pos:', new THREE.Vector3().setFromMatrixPosition(placedModel.matrixWorld));
         console.log('DEBUG camera world pos:', new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
         console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
