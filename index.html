@@ -112,7 +112,6 @@
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
-    // removido: previewCreated
 
     // variável que guarda o modelo colocado (garante apenas 1)
     let placedModel = null;
@@ -142,8 +141,6 @@
       console.log('Modelo carregado — animações:', gltf.animations.length, gltf.animations.map(a=>a.name));
       modelReady = true;
       setMessage('Modelo carregado. Clique em "START AR" para dar início à realidade aumentada. Aponte a câmera para o anel verde e toque para posicionar.');
-
-      // OBS: preview automático removido — agora o modelo só aparece quando você tocar no reticle
     }, undefined, (err) => {
       showError('Erro carregando aha2.glb: ' + err);
     });
@@ -197,31 +194,46 @@
 
     // handler seletor (apenas quando modelReady)
     const controller = renderer.xr.getController(0);
+
+    // === ALTERAÇÃO PRINCIPAL: ao selecionar, COPIO a matrix do reticle e DESATIVO matrixAutoUpdate
     controller.addEventListener('select', () => {
       if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
       if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
 
       try {
         if (placedModel) {
-          // já existe um modelo colocado: apenas reposiciona/rotaciona
-          placedModel.position.setFromMatrixPosition(reticle.matrix);
-          placedModel.quaternion.setFromRotationMatrix(reticle.matrix);
-          console.log('Modelo existente reposicionado.');
+          // Reposiciona: copia a matrix atual do reticle e congela a matrix do placedModel.
+          placedModel.matrixAutoUpdate = false;
+          placedModel.matrix.copy(reticle.matrix);
+          placedModel.updateMatrixWorld(true);
+          console.log('Modelo existente reposicionado (pose congelada).');
           return;
         }
 
+        // Clone seguro (SkeletonUtils quando disponível)
         const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
-        clone.position.setFromMatrixPosition(reticle.matrix);
-        clone.quaternion.setFromRotationMatrix(reticle.matrix);
-        scene.add(clone);
-        placedModel = clone; // guarda a referência — garante apenas 1 instância
 
+        // IMPORTANTE: copie a matrix mundial do reticle e desative atualizações automáticas
+        // Isso garante que o modelo permaneça fixo no mundo AR e não "siga" a câmera.
+        clone.matrixAutoUpdate = false;
+        clone.matrix.copy(reticle.matrix);
+        clone.updateMatrixWorld(true);
+
+        // Assegura que o clone esteja como filho direto da cena (não do controller/camera)
+        scene.add(clone);
+        placedModel = clone;
+
+        // se houver animações, iniciar mixer
         if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
           const m = new THREE.AnimationMixer(clone);
           baseGLTF.animations.forEach(clip => m.clipAction(clip).play());
           mixers.push(m);
           console.log('Clone adicionado e animação iniciada (mixers=', mixers.length, ')');
         } else console.log('Clone adicionado (sem animações).');
+
+        // debug rápido para garantir que não foi parentado errado
+        console.log('parent do placedModel:', placedModel.parent);
+        console.log('matrixAutoUpdate:', placedModel.matrixAutoUpdate);
       } catch (e) {
         showError('Falha ao clonar/colocar modelo: ' + e);
       }
