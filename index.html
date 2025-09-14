@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AR com WebXR — pseudocosmos (no-anim)</title>
+  <title>AR — locked model (fix)</title>
   <style>
     body{margin:0;overflow:hidden;font-family:sans-serif;background:#000;color:#fff}
     #message{position:fixed;left:10px;top:10px;z-index:20;background:#fff;color:#000;padding:8px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);max-width:calc(100% - 24px)}
@@ -35,15 +35,13 @@
     };
     const setMessage = m => document.getElementById('message').textContent = m;
 
-    // quick HEAD check do GLB
+    // checa GLB
     try {
       const head = await fetch('aha2.glb', { method: 'HEAD' });
       if (!head.ok) { showError('aha2.glb não encontrado (HTTP ' + head.status + ')'); setMessage('aha2.glb não encontrado. Abra fallback.'); return; }
-    } catch (e) {
-      showError('Erro checando aha2.glb: ' + e); return;
-    }
+    } catch (e) { showError('Erro checando aha2.glb: ' + e); return; }
 
-    // importar libs
+    // import libs
     let THREE, GLTFLoaderModule, ARButtonModule, SkeletonUtilsModule;
     try {
       THREE = await import('three');
@@ -57,13 +55,8 @@
     }
     const { GLTFLoader } = GLTFLoaderModule;
     const { ARButton } = ARButtonModule;
-
-    // detectar export do SkeletonUtils de forma robusta:
     let SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
-    if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) {
-      console.warn('SkeletonUtils não exportado na forma esperada — fallback para clone simples (pode afetar skinned objects).');
-      SkeletonUtils = null;
-    }
+    if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) { SkeletonUtils = null; }
 
     // renderer
     const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
@@ -72,7 +65,6 @@
     renderer.xr.enabled = true;
     if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
     else if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
-    if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.4;
     document.body.appendChild(renderer.domElement);
@@ -85,7 +77,7 @@
     scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
     const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(1,2,1); scene.add(dir);
 
-    // reticle - usamos decomposição para posição/quaternion
+    // reticle
     const ring = new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI/2);
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
     const reticle = new THREE.Mesh(ring, ringMat);
@@ -96,7 +88,7 @@
     reticle.scale.set(1,1,1);
     scene.add(reticle);
 
-    // PMREM + env (opcional)
+    // env (opcional)
     const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularShader();
     try {
       const tl = new THREE.TextureLoader();
@@ -108,21 +100,22 @@
       const envMap = pmrem.fromEquirectangular(envTex).texture;
       scene.environment = envMap;
       envTex.dispose(); pmrem.dispose();
-      console.log('Environment aplicado');
     } catch(e) { console.warn('Env falhou (não crítico):', e); }
 
-    // GLTF loader
+    // loader
     const loader = new GLTFLoader();
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
     let placedModel = null;
 
+    // *** novo: matriz travada para impedir teleporte
+    let lockedWorldMatrix = null; // THREE.Matrix4 or null
+
     loader.load('aha2.glb', (gltf) => {
       baseGLTF = gltf;
       modelPrototype = gltf.scene;
       modelPrototype.scale.set(0.5,0.5,0.5);
-
       modelPrototype.traverse(n => {
         if (n.isMesh && n.material) {
           n.material.side = THREE.DoubleSide;
@@ -138,15 +131,11 @@
           n.material.needsUpdate = true;
         }
       });
-
-      console.log('Modelo carregado — animações no arquivo:', (gltf.animations && gltf.animations.length) || 0);
       modelReady = true;
-      setMessage('Modelo carregado. Clique em "START AR" para dar início à realidade aumentada. Aponte a câmera para o anel verde e toque para posicionar.');
-    }, undefined, (err) => {
-      showError('Erro carregando aha2.glb: ' + err);
-    });
+      setMessage('Modelo carregado — aponte para o anel verde e toque para posicionar.');
+    }, undefined, (err) => showError('Erro carregando aha2.glb: ' + err));
 
-    // AR button / Quick Look fallback
+    // AR button / iOS
     const usdzUrl = new URL('aha2.usdz', location.href).href;
     function isIOS() {
       return /iP(hone|od|ad)/.test(navigator.platform)
@@ -154,30 +143,16 @@
     }
     if (isIOS()) {
       const arLink = document.createElement('a');
-      arLink.href = usdzUrl;
-      arLink.setAttribute('rel', 'ar');
-      arLink.style.position = 'fixed';
-      arLink.style.left = '10px';
-      arLink.style.bottom = '10px';
-      arLink.style.zIndex = '40';
-      arLink.style.padding = '10px 14px';
-      arLink.style.background = '#0b84ff';
-      arLink.style.color = '#fff';
-      arLink.style.borderRadius = '8px';
-      arLink.style.textDecoration = 'none';
-      arLink.textContent = 'Abrir AR (iOS Quick Look)';
-      document.body.appendChild(arLink);
-
+      arLink.href = usdzUrl; arLink.setAttribute('rel','ar');
+      arLink.style.position='fixed'; arLink.style.left='10px'; arLink.style.bottom='10px'; arLink.style.zIndex='40';
+      arLink.style.padding='10px 14px'; arLink.style.background='#0b84ff'; arLink.style.color='#fff'; arLink.style.borderRadius='8px';
+      arLink.textContent='Abrir AR (iOS Quick Look)'; document.body.appendChild(arLink);
       const mv = document.createElement('model-viewer');
-      mv.setAttribute('src', 'aha2.glb');
-      mv.setAttribute('ios-src', usdzUrl);
-      mv.setAttribute('ar', '');
-      mv.setAttribute('ar-modes', 'webxr quick-look scene-viewer');
-      mv.setAttribute('style', 'position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
-      mv.setAttribute('camera-controls', '');
-      document.body.appendChild(mv);
-
-      setMessage('iOS detectado — toque "Abrir AR (iOS Quick Look)" para ver em AR nativo.');
+      mv.setAttribute('src','aha2.glb'); mv.setAttribute('ios-src', usdzUrl); mv.setAttribute('ar','');
+      mv.setAttribute('ar-modes','webxr quick-look scene-viewer');
+      mv.setAttribute('style','position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
+      mv.setAttribute('camera-controls',''); document.body.appendChild(mv);
+      setMessage('iOS detectado — toque "Abrir AR (iOS Quick Look)".');
     } else {
       try { document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })); }
       catch(e) { showError('Erro criando botão AR: ' + e); }
@@ -185,11 +160,12 @@
 
     // controller
     const controller = renderer.xr.getController(0);
+    scene.add(controller);
 
-    // --- HIT TEST: quando houver resultados, seto reticle.matrix, decomponho e atualizo reticle.position/quaternion/scale
+    // hit-test
     const tmpMatrix = new THREE.Matrix4();
+
     renderer.setAnimationLoop((timestamp, frame) => {
-      // NOTE: removi clock/mixers/animacao (não usamos animações)
       if (frame) {
         const session = renderer.xr.getSession();
         const referenceSpace = renderer.xr.getReferenceSpace();
@@ -212,54 +188,84 @@
               reticle.matrix.decompose(reticle.position, reticle.quaternion, reticle.scale);
               reticle.visible = true;
               reticle.updateMatrixWorld(true);
-            } else {
-              reticle.visible = false;
-            }
+            } else reticle.visible = false;
           } else reticle.visible = false;
         }
+      }
+
+      // *** NOVO: se temos placedModel e lockedWorldMatrix, forçamos a matrix local para manter aquela matrixWorld
+      if (placedModel && lockedWorldMatrix) {
+        // pega matrixWorld do pai
+        const parent = placedModel.parent || scene;
+        const parentWorld = new THREE.Matrix4().copy(parent.matrixWorld || new THREE.Matrix4().identity());
+        const invParent = new THREE.Matrix4().copy(parentWorld).invert();
+        // localMatrix = invParent * lockedWorldMatrix
+        const newLocal = new THREE.Matrix4().multiplyMatrices(invParent, lockedWorldMatrix);
+        placedModel.matrix.copy(newLocal);
+        placedModel.matrixAutoUpdate = false; // importante: usar a matrix que definimos
+        placedModel.updateMatrixWorld(true);
       }
 
       renderer.render(scene, camera);
     });
 
-    // --- SELECT: posiciona o modelo usando position/quaternion do reticle (sem animações)
+    // select: coloca e trava a posição
     controller.addEventListener('select', () => {
       if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
       if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
 
       try {
         if (placedModel) {
+          // reposiciona e atualiza lockedWorldMatrix
           placedModel.position.copy(reticle.position);
           placedModel.quaternion.copy(reticle.quaternion);
           placedModel.scale.copy(reticle.scale);
           placedModel.updateMatrixWorld(true);
-          console.log('Modelo existente reposicionado.');
-          console.log('DEBUG model world pos:', new THREE.Vector3().setFromMatrixPosition(placedModel.matrixWorld));
+          // salva matrixWorld atual como 'trava'
+          lockedWorldMatrix = placedModel.matrixWorld.clone();
+          placedModel.matrixAutoUpdate = false;
+          console.log('Modelo existente reposicionado e travado.');
+          console.log('DEBUG lockedWorldMatrix:', lockedWorldMatrix.elements);
           console.log('DEBUG camera world pos:', new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
           console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
           return;
         }
 
         const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
+        // coloque explicitamente como filho da cena (importante)
         scene.add(clone);
 
+        // copie transform do reticle
         clone.position.copy(reticle.position);
         clone.quaternion.copy(reticle.quaternion);
         clone.scale.copy(reticle.scale);
-        clone.matrixAutoUpdate = true;
         clone.updateMatrixWorld(true);
 
+        // agora trave a matrixWorld
         placedModel = clone;
+        lockedWorldMatrix = placedModel.matrixWorld.clone();
+        placedModel.matrixAutoUpdate = false; // vamos controlar via lockedWorldMatrix
+        placedModel.updateMatrixWorld(true);
 
-        console.log('Clone adicionado (sem animações).');
-        console.log('DEBUG placedModel world pos:', new THREE.Vector3().setFromMatrixPosition(placedModel.matrixWorld));
+        console.log('Clone adicionado e travado (sem animações).');
+        console.log('DEBUG lockedWorldMatrix:', lockedWorldMatrix.elements);
         console.log('DEBUG camera world pos:', new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
         console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
       } catch (e) {
         showError('Falha ao clonar/colocar modelo: ' + e);
       }
     });
-    scene.add(controller);
+
+    // reset helper (opcional via console)
+    window.__resetPlacedModel = () => {
+      if (placedModel) {
+        scene.remove(placedModel);
+        placedModel = null;
+        lockedWorldMatrix = null;
+        setMessage('Modelo removido.');
+        console.log('placedModel resetado');
+      }
+    };
 
     window.addEventListener('resize', () => {
       camera.aspect = window.innerWidth/window.innerHeight;
