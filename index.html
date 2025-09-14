@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AR — anchors + local-floor (fix definitivo)</title>
+  <title>AR com WebXR — pseudocosmos (fix)</title>
   <style>
     body{margin:0;overflow:hidden;font-family:sans-serif;background:#000;color:#fff}
     #message{position:fixed;left:10px;top:10px;z-index:20;background:#fff;color:#000;padding:8px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);max-width:calc(100% - 24px)}
@@ -19,6 +19,7 @@
   }
   </script>
 
+  <!-- model-viewer: usado como preview e para abrir Quick Look no iOS -->
   <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
 </head>
 <body>
@@ -37,9 +38,11 @@
 
     // quick HEAD check do GLB
     try {
-      const head = await fetch('aha2.glb', { method: 'HEAD' });
-      if (!head.ok) { showError('aha2.glb não encontrado (HTTP ' + head.status + ')'); setMessage('aha2.glb não encontrado. Abra fallback.'); return; }
-    } catch (e) { showError('Erro checando aha2.glb: ' + e); return; }
+      const head = await fetch('aha.glb', { method: 'HEAD' });
+      if (!head.ok) { showError('aha.glb não encontrado (HTTP ' + head.status + ')'); setMessage('aha.glb não encontrado. Abra fallback.'); return; }
+    } catch (e) {
+      showError('Erro checando aha.glb: ' + e); return;
+    }
 
     // importar libs
     let THREE, GLTFLoaderModule, ARButtonModule, SkeletonUtilsModule;
@@ -55,18 +58,23 @@
     }
     const { GLTFLoader } = GLTFLoaderModule;
     const { ARButton } = ARButtonModule;
-    let SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
-    if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) { SkeletonUtils = null; }
 
-    // renderer (forçamos local-floor como reference space type)
+    // detectar export do SkeletonUtils de forma robusta:
+    let SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
+    if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) {
+      console.warn('SkeletonUtils não exportado na forma esperada — fallback para clone simples (isso pode impedir animações skinned em alguns modelos).');
+      SkeletonUtils = null;
+    }
+
+    // renderer
     const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
-    try { renderer.xr.setReferenceSpaceType && renderer.xr.setReferenceSpaceType('local-floor'); }
-    catch (e) { console.warn('setReferenceSpaceType não suportado:', e); }
+    // compat APIs antigas/novas
     if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
     else if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
+    if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.4;
     document.body.appendChild(renderer.domElement);
@@ -79,18 +87,12 @@
     scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
     const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(1,2,1); scene.add(dir);
 
-    // reticle - decomposição para position/quaternion
+    // reticle
     const ring = new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI/2);
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
-    const reticle = new THREE.Mesh(ring, ringMat);
-    reticle.matrixAutoUpdate = false;
-    reticle.visible = false;
-    reticle.position.set(0,0,0);
-    reticle.quaternion.set(0,0,0,1);
-    reticle.scale.set(1,1,1);
-    scene.add(reticle);
+    const reticle = new THREE.Mesh(ring, ringMat); reticle.matrixAutoUpdate = false; reticle.visible = false; scene.add(reticle);
 
-    // env (opcional)
+    // PMREM + env
     const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularShader();
     try {
       const tl = new THREE.TextureLoader();
@@ -102,25 +104,25 @@
       const envMap = pmrem.fromEquirectangular(envTex).texture;
       scene.environment = envMap;
       envTex.dispose(); pmrem.dispose();
+      console.log('Environment aplicado');
     } catch(e) { console.warn('Env falhou (não crítico):', e); }
 
-    // loader
+    // GLTF loader
     const loader = new GLTFLoader();
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
+    // removido: previewCreated
+
+    // variável que guarda o modelo colocado (garante apenas 1)
     let placedModel = null;
 
-    // anchors + lockedMatrix
-    let sessionAnchorsSupported = false;
-    let sessionLocalRefSpace = null;
-    let lastHit = null; // último XRHitTestResult válido
-    let lockedWorldMatrix = null; // fallback matrixWorld
-
-    loader.load('aha2.glb', (gltf) => {
+    loader.load('aha.glb', (gltf) => {
       baseGLTF = gltf;
       modelPrototype = gltf.scene;
       modelPrototype.scale.set(0.5,0.5,0.5);
+
+      // safe material fallbacks pra debug/visibilidade
       modelPrototype.traverse(n => {
         if (n.isMesh && n.material) {
           n.material.side = THREE.DoubleSide;
@@ -136,247 +138,127 @@
           n.material.needsUpdate = true;
         }
       });
-      modelReady = true;
-      setMessage('Modelo carregado — aponte para o anel verde e toque para posicionar.');
-    }, undefined, (err) => showError('Erro carregando aha2.glb: ' + err));
 
-    // AR button / Quick Look fallback
-    const usdzUrl = new URL('aha2.usdz', location.href).href;
+      console.log('Modelo carregado — animações:', gltf.animations.length, gltf.animations.map(a=>a.name));
+      modelReady = true;
+      setMessage('Modelo carregado. Clique em "START AR" para dar início à realidade aumentada. Aponte a câmera para o anel verde e toque para posicionar.');
+
+      // OBS: preview automático removido — agora o modelo só aparece quando você tocar no reticle
+    }, undefined, (err) => {
+      showError('Erro carregando aha.glb: ' + err);
+    });
+
+    // AR button / iOS Quick Look fallback
+    // assume aha.usdz está no mesmo diretório do index.html; ajuste se necessário
+    const usdzUrl = new URL('aha.usdz', location.href).href;
+
     function isIOS() {
       return /iP(hone|od|ad)/.test(navigator.platform)
         || (navigator.userAgent.includes("Mac") && "ontouchend" in document);
     }
+
     if (isIOS()) {
+      // cria link que abre Quick Look (iOS)
       const arLink = document.createElement('a');
-      arLink.href = usdzUrl; arLink.setAttribute('rel','ar');
-      arLink.style.position='fixed'; arLink.style.left='10px'; arLink.style.bottom='10px'; arLink.style.zIndex='40';
-      arLink.style.padding='10px 14px'; arLink.style.background='#0b84ff'; arLink.style.color='#fff'; arLink.style.borderRadius='8px';
-      arLink.textContent='Abrir AR (iOS Quick Look)'; document.body.appendChild(arLink);
+      arLink.href = usdzUrl;
+      arLink.setAttribute('rel', 'ar');
+      arLink.style.position = 'fixed';
+      arLink.style.left = '10px';
+      arLink.style.bottom = '10px';
+      arLink.style.zIndex = '40';
+      arLink.style.padding = '10px 14px';
+      arLink.style.background = '#0b84ff';
+      arLink.style.color = '#fff';
+      arLink.style.borderRadius = '8px';
+      arLink.style.textDecoration = 'none';
+      arLink.textContent = 'Abrir AR (iOS Quick Look)';
+      document.body.appendChild(arLink);
+
+      // opcional: mini-preview com model-viewer (clicável também)
       const mv = document.createElement('model-viewer');
-      mv.setAttribute('src','aha2.glb'); mv.setAttribute('ios-src', usdzUrl); mv.setAttribute('ar','');
-      mv.setAttribute('ar-modes','webxr quick-look scene-viewer');
-      mv.setAttribute('style','position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
-      mv.setAttribute('camera-controls',''); document.body.appendChild(mv);
-      setMessage('iOS detectado — toque "Abrir AR (iOS Quick Look)".');
+      mv.setAttribute('src', 'aha.glb');    // mantém seu GLB para preview web
+      mv.setAttribute('ios-src', usdzUrl);  // fonte para Quick Look
+      mv.setAttribute('ar', '');
+      mv.setAttribute('ar-modes', 'webxr quick-look scene-viewer');
+      mv.setAttribute('style', 'position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
+      mv.setAttribute('camera-controls', '');
+      document.body.appendChild(mv);
+
+      setMessage('iOS detectado — toque "Abrir AR (iOS Quick Look)" para ver em AR nativo.');
     } else {
-      try {
-        document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
-      } catch(e) { showError('Erro criando botão AR: ' + e); }
+      // comportamento atual para WebXR (Android / navegadores com suporte)
+      try { document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })); }
+      catch(e) { showError('Erro criando botão AR: ' + e); }
     }
 
-    // controller
+    // mixers e clock
+    const mixers = [];
+    const clock = new THREE.Clock();
+
+    // handler seletor (apenas quando modelReady)
     const controller = renderer.xr.getController(0);
+    controller.addEventListener('select', () => {
+      if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
+      if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
+
+      try {
+        if (placedModel) {
+          // já existe um modelo colocado: apenas reposiciona/rotaciona
+          placedModel.position.setFromMatrixPosition(reticle.matrix);
+          placedModel.quaternion.setFromRotationMatrix(reticle.matrix);
+          console.log('Modelo existente reposicionado.');
+          return;
+        }
+
+        const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
+        clone.position.setFromMatrixPosition(reticle.matrix);
+        clone.quaternion.setFromRotationMatrix(reticle.matrix);
+        scene.add(clone);
+        placedModel = clone; // guarda a referência — garante apenas 1 instância
+
+        if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
+          const m = new THREE.AnimationMixer(clone);
+          baseGLTF.animations.forEach(clip => m.clipAction(clip).play());
+          mixers.push(m);
+          console.log('Clone adicionado e animação iniciada (mixers=', mixers.length, ')');
+        } else console.log('Clone adicionado (sem animações).');
+      } catch (e) {
+        showError('Falha ao clonar/colocar modelo: ' + e);
+      }
+    });
     scene.add(controller);
 
-    // quando sessão iniciar
-    renderer.xr.addEventListener('sessionstart', async () => {
-      const session = renderer.xr.getSession();
-      if (!session) return;
-      // veja se anchors estão disponíveis
-      sessionAnchorsSupported = !!(session.requestHitTestSource && (typeof XRAnchor !== 'undefined' || 'anchors' in session));
-      console.log('anchors supported:', sessionAnchorsSupported);
-
-      // tenta pegar local-floor e guarda
-      try {
-        session.requestReferenceSpace('local-floor').then(ref => {
-          sessionLocalRefSpace = ref;
-          console.log('session._localRefSpace configurado (local-floor).');
-        }).catch(e => {
-          console.warn('Não foi possível obter local-floor (fallback):', e);
-          sessionLocalRefSpace = renderer.xr.getReferenceSpace();
-        });
-      } catch (e) {
-        console.warn('Erro pedindo local-floor:', e);
-        sessionLocalRefSpace = renderer.xr.getReferenceSpace();
-      }
-
-      // opcional: inicializa um container de anchors
-      session._anchors = session._anchors || [];
-    });
-
-    // hit-test + loop
-    const tmpMatrix = new THREE.Matrix4();
+    // loop + hit-test
+    const tmp = new THREE.Matrix4();
     renderer.setAnimationLoop((timestamp, frame) => {
+      const delta = clock.getDelta();
+      for (const mm of mixers) mm.update(delta);
+
       if (frame) {
         const session = renderer.xr.getSession();
-        const referenceSpace = sessionLocalRefSpace || renderer.xr.getReferenceSpace();
-
-        // criar hit test source (viewer) se necessário
+        const referenceSpace = renderer.xr.getReferenceSpace();
         if (session && !session._hitTestSourceRequested) {
           session._hitTestSourceRequested = true;
           session.requestReferenceSpace('viewer').then(viewerSpace => {
-            session.requestHitTestSource({ space: viewerSpace }).then(src => {
-              session._hitTestSource = src;
-              console.log('Hit test source criado.');
-            }).catch(e => console.warn('requestHitTestSource failed', e));
+            session.requestHitTestSource({ space: viewerSpace }).then(src => session._hitTestSource = src)
+              .catch(e => console.warn('requestHitTestSource failed', e));
           }).catch(e => console.warn('requestReferenceSpace failed', e));
         }
-
         const ht = session && session._hitTestSource;
         if (ht) {
           const results = frame.getHitTestResults(ht);
           if (results.length > 0) {
             const hit = results[0];
-            lastHit = hit; // guardamos o hit atual para usar no select()
-            // IMPORTANTE: pedimos pose no referenceSpace 'local-floor' (fixo no mundo)
             const pose = hit.getPose(referenceSpace);
-            if (pose) {
-              tmpMatrix.fromArray(pose.transform.matrix);
-              reticle.matrix.copy(tmpMatrix);
-              reticle.matrix.decompose(reticle.position, reticle.quaternion, reticle.scale);
-              reticle.visible = true;
-              reticle.updateMatrixWorld(true);
-            } else {
-              reticle.visible = false;
-            }
-          } else {
-            lastHit = null;
-            reticle.visible = false;
-          }
+            tmp.fromArray(pose.transform.matrix);
+            reticle.matrix.copy(tmp);
+            reticle.visible = true;
+          } else reticle.visible = false;
         }
-      }
-
-      // STEP: se o placedModel tiver um anchor, resolvemos sua pose via anchor.anchorSpace
-      if (frame && placedModel && placedModel._anchor) {
-        try {
-          const anchorSpace = placedModel._anchor.anchorSpace;
-          const refSpace = sessionLocalRefSpace || renderer.xr.getReferenceSpace();
-          const anchorPose = frame.getPose(anchorSpace, refSpace);
-          if (anchorPose) {
-            const m = new THREE.Matrix4().fromArray(anchorPose.transform.matrix);
-            // aplicamos diretamente a matrixWorld do modelo (convertendo para local via parent)
-            const parent = placedModel.parent || scene;
-            const invParent = new THREE.Matrix4().copy(parent.matrixWorld).invert();
-            const local = new THREE.Matrix4().multiplyMatrices(invParent, m);
-            placedModel.matrix.copy(local);
-            placedModel.matrixAutoUpdate = false;
-            placedModel.updateMatrixWorld(true);
-          } else {
-            // fallback: não conseguimos pose do anchor — não fazer nada
-          }
-        } catch (e) {
-          console.warn('Erro atualizando pose via anchor:', e);
-        }
-      } else if (placedModel && lockedWorldMatrix) {
-        // fallback antigo: forçar lockedWorldMatrix
-        const parent = placedModel.parent || scene;
-        const parentWorld = new THREE.Matrix4().copy(parent.matrixWorld || new THREE.Matrix4().identity());
-        const invParent = new THREE.Matrix4().copy(parentWorld).invert();
-        const newLocal = new THREE.Matrix4().multiplyMatrices(invParent, lockedWorldMatrix);
-        placedModel.matrix.copy(newLocal);
-        placedModel.matrixAutoUpdate = false;
-        placedModel.updateMatrixWorld(true);
       }
 
       renderer.render(scene, camera);
     });
-
-    // SELECT: tenta criar anchor a partir do lastHit; se não suportado, usa fallback lockedWorldMatrix
-    controller.addEventListener('select', async () => {
-      if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
-      if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
-
-      const session = renderer.xr.getSession();
-
-      try {
-        if (placedModel) {
-          // reposiciona e re-trava (tenta recriar anchor se suportado)
-          placedModel.position.copy(reticle.position);
-          placedModel.quaternion.copy(reticle.quaternion);
-          placedModel.scale.copy(reticle.scale);
-          placedModel.updateMatrixWorld(true);
-
-          // tenta criar novo anchor a partir do lastHit (se possível)
-          if (lastHit && typeof lastHit.createAnchor === 'function' && sessionAnchorsSupported && session) {
-            try {
-              const anchor = await lastHit.createAnchor(); // cria anchor at hit
-              session._anchors = session._anchors || [];
-              session._anchors.push(anchor);
-              // guarda anchor no placedModel para usar no loop
-              placedModel._anchor = anchor;
-              // também grava lockedWorldMatrix como backup
-              lockedWorldMatrix = placedModel.matrixWorld.clone();
-              placedModel.matrixAutoUpdate = false;
-              console.log('anchor criado (reposicionado).', anchor);
-              console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
-              return;
-            } catch (e) {
-              console.warn('createAnchor falhou (reposicionamento):', e);
-              // cairá no fallback abaixo
-            }
-          }
-
-          // fallback sem anchor
-          lockedWorldMatrix = placedModel.matrixWorld.clone();
-          placedModel.matrixAutoUpdate = false;
-          console.log('Modelo existente reposicionado e travado (fallback).');
-          console.log('DEBUG lockedWorldMatrix:', lockedWorldMatrix.elements);
-          console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
-          return;
-        }
-
-        // Criar novo clone
-        const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
-        // sempre adicione à cena (não ao camera/controller)
-        scene.add(clone);
-        clone.position.copy(reticle.position);
-        clone.quaternion.copy(reticle.quaternion);
-        clone.scale.copy(reticle.scale);
-        clone.updateMatrixWorld(true);
-
-        // agora tente criar anchor (pref)
-        let createdAnchor = null;
-        if (lastHit && typeof lastHit.createAnchor === 'function' && sessionAnchorsSupported && session) {
-          try {
-            createdAnchor = await lastHit.createAnchor();
-            session._anchors = session._anchors || [];
-            session._anchors.push(createdAnchor);
-            clone._anchor = createdAnchor;
-            // quando anchor existir, vamos confiar na anchor para atualizar pose no loop
-            clone.matrixAutoUpdate = false;
-            console.log('anchor criado com sucesso:', createdAnchor);
-          } catch (e) {
-            console.warn('createAnchor falhou na criação inicial:', e);
-            createdAnchor = null;
-          }
-        }
-
-        // se não temos anchor, usamos lockedWorldMatrix fallback
-        placedModel = clone;
-        if (!createdAnchor) {
-          lockedWorldMatrix = placedModel.matrixWorld.clone();
-          placedModel.matrixAutoUpdate = false;
-          console.log('Clone adicionado e travado (fallback, sem anchor).');
-        } else {
-          // já travamos matrixAutoUpdate false; lockedWorldMatrix como backup
-          lockedWorldMatrix = placedModel.matrixWorld.clone();
-          console.log('Clone adicionado e ancorado.');
-        }
-
-        console.log('DEBUG placedModel world pos:', new THREE.Vector3().setFromMatrixPosition(placedModel.matrixWorld));
-        console.log('DEBUG camera world pos:', new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
-        console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
-      } catch (e) {
-        showError('Falha ao clonar/colocar modelo: ' + e);
-      }
-    });
-
-    // helper para remover (via console)
-    window.__resetPlacedModel = () => {
-      try {
-        const session = renderer.xr.getSession();
-        if (session && session._anchors) {
-          session._anchors.forEach(a => { try { a.delete && a.delete(); } catch(e){} });
-          session._anchors = [];
-        }
-      } catch(e){}
-      if (placedModel) {
-        try { scene.remove(placedModel); } catch(e){}
-      }
-      placedModel = null; lockedWorldMatrix = null;
-      setMessage('Modelo removido.');
-      console.log('placedModel resetado');
-    };
 
     window.addEventListener('resize', () => {
       camera.aspect = window.innerWidth/window.innerHeight;
