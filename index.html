@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AR — locked model (local-floor fix)</title>
+  <title>AR — anchors + local-floor (fix definitivo)</title>
   <style>
     body{margin:0;overflow:hidden;font-family:sans-serif;background:#000;color:#fff}
     #message{position:fixed;left:10px;top:10px;z-index:20;background:#fff;color:#000;padding:8px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);max-width:calc(100% - 24px)}
@@ -63,9 +63,8 @@
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
-    // Pedir explicitamente local-floor (mais estável para objetos fixos no mundo)
     try { renderer.xr.setReferenceSpaceType && renderer.xr.setReferenceSpaceType('local-floor'); }
-    catch (e) { console.warn('Não foi possível setReferenceSpaceType (fallback ok):', e); }
+    catch (e) { console.warn('setReferenceSpaceType não suportado:', e); }
     if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
     else if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -80,7 +79,7 @@
     scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
     const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(1,2,1); scene.add(dir);
 
-    // reticle - usamos decomposição para posição/quaternion
+    // reticle - decomposição para position/quaternion
     const ring = new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI/2);
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
     const reticle = new THREE.Mesh(ring, ringMat);
@@ -91,7 +90,7 @@
     reticle.scale.set(1,1,1);
     scene.add(reticle);
 
-    // PMREM + env (opcional)
+    // env (opcional)
     const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularShader();
     try {
       const tl = new THREE.TextureLoader();
@@ -105,15 +104,18 @@
       envTex.dispose(); pmrem.dispose();
     } catch(e) { console.warn('Env falhou (não crítico):', e); }
 
-    // GLTF loader
+    // loader
     const loader = new GLTFLoader();
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
     let placedModel = null;
 
-    // *** novo: matriz travada para impedir teleporte
-    let lockedWorldMatrix = null; // THREE.Matrix4 or null
+    // anchors + lockedMatrix
+    let sessionAnchorsSupported = false;
+    let sessionLocalRefSpace = null;
+    let lastHit = null; // último XRHitTestResult válido
+    let lockedWorldMatrix = null; // fallback matrixWorld
 
     loader.load('aha2.glb', (gltf) => {
       baseGLTF = gltf;
@@ -157,55 +159,57 @@
       mv.setAttribute('camera-controls',''); document.body.appendChild(mv);
       setMessage('iOS detectado — toque "Abrir AR (iOS Quick Look)".');
     } else {
-      try { document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })); }
-      catch(e) { showError('Erro criando botão AR: ' + e); }
+      try {
+        document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
+      } catch(e) { showError('Erro criando botão AR: ' + e); }
     }
 
     // controller
     const controller = renderer.xr.getController(0);
     scene.add(controller);
 
-    // Quando a sessão começar, peça explicitamente um reference space 'local-floor' e guarde-o no session
+    // quando sessão iniciar
     renderer.xr.addEventListener('sessionstart', async () => {
+      const session = renderer.xr.getSession();
+      if (!session) return;
+      // veja se anchors estão disponíveis
+      sessionAnchorsSupported = !!(session.requestHitTestSource && (typeof XRAnchor !== 'undefined' || 'anchors' in session));
+      console.log('anchors supported:', sessionAnchorsSupported);
+
+      // tenta pegar local-floor e guarda
       try {
-        const session = renderer.xr.getSession();
-        if (session) {
-          // pedimos reference space 'local-floor' e guardamos — será usado para getPose
-          session.requestReferenceSpace('local-floor').then(ref => {
-            session._localRefSpace = ref;
-            console.log('session._localRefSpace configurado (local-floor).');
-          }).catch(e => {
-            console.warn('Não foi possível obter local-floor (fallback):', e);
-            session._localRefSpace = renderer.xr.getReferenceSpace();
-          });
-        }
+        session.requestReferenceSpace('local-floor').then(ref => {
+          sessionLocalRefSpace = ref;
+          console.log('session._localRefSpace configurado (local-floor).');
+        }).catch(e => {
+          console.warn('Não foi possível obter local-floor (fallback):', e);
+          sessionLocalRefSpace = renderer.xr.getReferenceSpace();
+        });
       } catch (e) {
-        console.warn('Erro em sessionstart handler:', e);
+        console.warn('Erro pedindo local-floor:', e);
+        sessionLocalRefSpace = renderer.xr.getReferenceSpace();
       }
+
+      // opcional: inicializa um container de anchors
+      session._anchors = session._anchors || [];
     });
 
-    // hit-test loop
+    // hit-test + loop
     const tmpMatrix = new THREE.Matrix4();
-
     renderer.setAnimationLoop((timestamp, frame) => {
       if (frame) {
         const session = renderer.xr.getSession();
-        // use reference space from session._localRefSpace preferencialmente
-        const referenceSpace = (session && session._localRefSpace) ? session._localRefSpace : renderer.xr.getReferenceSpace();
+        const referenceSpace = sessionLocalRefSpace || renderer.xr.getReferenceSpace();
 
+        // criar hit test source (viewer) se necessário
         if (session && !session._hitTestSourceRequested) {
           session._hitTestSourceRequested = true;
-          try {
-            // quer o viewer space para o hit-test source (padrão)
-            session.requestReferenceSpace('viewer').then(viewerSpace => {
-              session.requestHitTestSource({ space: viewerSpace }).then(src => {
-                session._hitTestSource = src;
-                console.log('Hit test source criado.');
-              }).catch(e => console.warn('requestHitTestSource failed', e));
-            }).catch(e => console.warn('requestReferenceSpace viewer failed', e));
-          } catch (e) {
-            console.warn('Erro criando hit test source:', e);
-          }
+          session.requestReferenceSpace('viewer').then(viewerSpace => {
+            session.requestHitTestSource({ space: viewerSpace }).then(src => {
+              session._hitTestSource = src;
+              console.log('Hit test source criado.');
+            }).catch(e => console.warn('requestHitTestSource failed', e));
+          }).catch(e => console.warn('requestReferenceSpace failed', e));
         }
 
         const ht = session && session._hitTestSource;
@@ -213,7 +217,9 @@
           const results = frame.getHitTestResults(ht);
           if (results.length > 0) {
             const hit = results[0];
-            const pose = hit.getPose(referenceSpace); // <-- IMPORTANT: usar referenceSpace fixo (local-floor)
+            lastHit = hit; // guardamos o hit atual para usar no select()
+            // IMPORTANTE: pedimos pose no referenceSpace 'local-floor' (fixo no mundo)
+            const pose = hit.getPose(referenceSpace);
             if (pose) {
               tmpMatrix.fromArray(pose.transform.matrix);
               reticle.matrix.copy(tmpMatrix);
@@ -223,12 +229,36 @@
             } else {
               reticle.visible = false;
             }
-          } else reticle.visible = false;
+          } else {
+            lastHit = null;
+            reticle.visible = false;
+          }
         }
       }
 
-      // se temos placedModel e lockedWorldMatrix, forçamos a matrix local para manter aquela matrixWorld
-      if (placedModel && lockedWorldMatrix) {
+      // STEP: se o placedModel tiver um anchor, resolvemos sua pose via anchor.anchorSpace
+      if (frame && placedModel && placedModel._anchor) {
+        try {
+          const anchorSpace = placedModel._anchor.anchorSpace;
+          const refSpace = sessionLocalRefSpace || renderer.xr.getReferenceSpace();
+          const anchorPose = frame.getPose(anchorSpace, refSpace);
+          if (anchorPose) {
+            const m = new THREE.Matrix4().fromArray(anchorPose.transform.matrix);
+            // aplicamos diretamente a matrixWorld do modelo (convertendo para local via parent)
+            const parent = placedModel.parent || scene;
+            const invParent = new THREE.Matrix4().copy(parent.matrixWorld).invert();
+            const local = new THREE.Matrix4().multiplyMatrices(invParent, m);
+            placedModel.matrix.copy(local);
+            placedModel.matrixAutoUpdate = false;
+            placedModel.updateMatrixWorld(true);
+          } else {
+            // fallback: não conseguimos pose do anchor — não fazer nada
+          }
+        } catch (e) {
+          console.warn('Erro atualizando pose via anchor:', e);
+        }
+      } else if (placedModel && lockedWorldMatrix) {
+        // fallback antigo: forçar lockedWorldMatrix
         const parent = placedModel.parent || scene;
         const parentWorld = new THREE.Matrix4().copy(parent.matrixWorld || new THREE.Matrix4().identity());
         const invParent = new THREE.Matrix4().copy(parentWorld).invert();
@@ -241,40 +271,89 @@
       renderer.render(scene, camera);
     });
 
-    // select: coloca e trava a posição
-    controller.addEventListener('select', () => {
+    // SELECT: tenta criar anchor a partir do lastHit; se não suportado, usa fallback lockedWorldMatrix
+    controller.addEventListener('select', async () => {
       if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
       if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
 
+      const session = renderer.xr.getSession();
+
       try {
         if (placedModel) {
+          // reposiciona e re-trava (tenta recriar anchor se suportado)
           placedModel.position.copy(reticle.position);
           placedModel.quaternion.copy(reticle.quaternion);
           placedModel.scale.copy(reticle.scale);
           placedModel.updateMatrixWorld(true);
+
+          // tenta criar novo anchor a partir do lastHit (se possível)
+          if (lastHit && typeof lastHit.createAnchor === 'function' && sessionAnchorsSupported && session) {
+            try {
+              const anchor = await lastHit.createAnchor(); // cria anchor at hit
+              session._anchors = session._anchors || [];
+              session._anchors.push(anchor);
+              // guarda anchor no placedModel para usar no loop
+              placedModel._anchor = anchor;
+              // também grava lockedWorldMatrix como backup
+              lockedWorldMatrix = placedModel.matrixWorld.clone();
+              placedModel.matrixAutoUpdate = false;
+              console.log('anchor criado (reposicionado).', anchor);
+              console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
+              return;
+            } catch (e) {
+              console.warn('createAnchor falhou (reposicionamento):', e);
+              // cairá no fallback abaixo
+            }
+          }
+
+          // fallback sem anchor
           lockedWorldMatrix = placedModel.matrixWorld.clone();
           placedModel.matrixAutoUpdate = false;
-          console.log('Modelo existente reposicionado e travado.');
+          console.log('Modelo existente reposicionado e travado (fallback).');
           console.log('DEBUG lockedWorldMatrix:', lockedWorldMatrix.elements);
-          console.log('DEBUG camera world pos:', new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
           console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
           return;
         }
 
+        // Criar novo clone
         const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
+        // sempre adicione à cena (não ao camera/controller)
         scene.add(clone);
         clone.position.copy(reticle.position);
         clone.quaternion.copy(reticle.quaternion);
         clone.scale.copy(reticle.scale);
         clone.updateMatrixWorld(true);
 
-        placedModel = clone;
-        lockedWorldMatrix = placedModel.matrixWorld.clone();
-        placedModel.matrixAutoUpdate = false;
-        placedModel.updateMatrixWorld(true);
+        // agora tente criar anchor (pref)
+        let createdAnchor = null;
+        if (lastHit && typeof lastHit.createAnchor === 'function' && sessionAnchorsSupported && session) {
+          try {
+            createdAnchor = await lastHit.createAnchor();
+            session._anchors = session._anchors || [];
+            session._anchors.push(createdAnchor);
+            clone._anchor = createdAnchor;
+            // quando anchor existir, vamos confiar na anchor para atualizar pose no loop
+            clone.matrixAutoUpdate = false;
+            console.log('anchor criado com sucesso:', createdAnchor);
+          } catch (e) {
+            console.warn('createAnchor falhou na criação inicial:', e);
+            createdAnchor = null;
+          }
+        }
 
-        console.log('Clone adicionado e travado (sem animações).');
-        console.log('DEBUG lockedWorldMatrix:', lockedWorldMatrix.elements);
+        // se não temos anchor, usamos lockedWorldMatrix fallback
+        placedModel = clone;
+        if (!createdAnchor) {
+          lockedWorldMatrix = placedModel.matrixWorld.clone();
+          placedModel.matrixAutoUpdate = false;
+          console.log('Clone adicionado e travado (fallback, sem anchor).');
+        } else {
+          // já travamos matrixAutoUpdate false; lockedWorldMatrix como backup
+          lockedWorldMatrix = placedModel.matrixWorld.clone();
+          console.log('Clone adicionado e ancorado.');
+        }
+
+        console.log('DEBUG placedModel world pos:', new THREE.Vector3().setFromMatrixPosition(placedModel.matrixWorld));
         console.log('DEBUG camera world pos:', new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
         console.log('placedModel.parent:', placedModel.parent && placedModel.parent.type);
       } catch (e) {
@@ -282,15 +361,21 @@
       }
     });
 
-    // helper para reset via console
+    // helper para remover (via console)
     window.__resetPlacedModel = () => {
+      try {
+        const session = renderer.xr.getSession();
+        if (session && session._anchors) {
+          session._anchors.forEach(a => { try { a.delete && a.delete(); } catch(e){} });
+          session._anchors = [];
+        }
+      } catch(e){}
       if (placedModel) {
-        scene.remove(placedModel);
-        placedModel = null;
-        lockedWorldMatrix = null;
-        setMessage('Modelo removido.');
-        console.log('placedModel resetado');
+        try { scene.remove(placedModel); } catch(e){}
       }
+      placedModel = null; lockedWorldMatrix = null;
+      setMessage('Modelo removido.');
+      console.log('placedModel resetado');
     };
 
     window.addEventListener('resize', () => {
