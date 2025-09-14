@@ -18,6 +18,9 @@
     }
   }
   </script>
+
+  <!-- model-viewer: usado como preview e para abrir Quick Look no iOS -->
+  <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
 </head>
 <body>
   <div id="message">Iniciando…</div>
@@ -80,7 +83,7 @@
     const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
 
     // luzes
-    scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+    scene.add(new THREE.AmbientLight(0xffffff, 1.0));
     scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
     const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(1,2,1); scene.add(dir);
 
@@ -145,9 +148,48 @@
       showError('Erro carregando aha.glb: ' + err);
     });
 
-    // AR button
-    try { document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })); }
-    catch(e) { showError('Erro criando botão AR: ' + e); }
+    // AR button / iOS Quick Look fallback
+    // assume aha.usdz está no mesmo diretório do index.html; ajuste se necessário
+    const usdzUrl = new URL('aha.usdz', location.href).href;
+
+    function isIOS() {
+      return /iP(hone|od|ad)/.test(navigator.platform)
+        || (navigator.userAgent.includes("Mac") && "ontouchend" in document);
+    }
+
+    if (isIOS()) {
+      // cria link que abre Quick Look (iOS)
+      const arLink = document.createElement('a');
+      arLink.href = usdzUrl;
+      arLink.setAttribute('rel', 'ar');
+      arLink.style.position = 'fixed';
+      arLink.style.left = '10px';
+      arLink.style.bottom = '10px';
+      arLink.style.zIndex = '40';
+      arLink.style.padding = '10px 14px';
+      arLink.style.background = '#0b84ff';
+      arLink.style.color = '#fff';
+      arLink.style.borderRadius = '8px';
+      arLink.style.textDecoration = 'none';
+      arLink.textContent = 'Abrir AR (iOS Quick Look)';
+      document.body.appendChild(arLink);
+
+      // opcional: mini-preview com model-viewer (clicável também)
+      const mv = document.createElement('model-viewer');
+      mv.setAttribute('src', 'aha.glb');    // mantém seu GLB para preview web
+      mv.setAttribute('ios-src', usdzUrl);  // fonte para Quick Look
+      mv.setAttribute('ar', '');
+      mv.setAttribute('ar-modes', 'webxr quick-look scene-viewer');
+      mv.setAttribute('style', 'position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
+      mv.setAttribute('camera-controls', '');
+      document.body.appendChild(mv);
+
+      setMessage('iOS detectado — toque "Abrir AR (iOS Quick Look)" para ver em AR nativo.');
+    } else {
+      // comportamento atual para WebXR (Android / navegadores com suporte)
+      try { document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })); }
+      catch(e) { showError('Erro criando botão AR: ' + e); }
+    }
 
     // mixers e clock
     const mixers = [];
