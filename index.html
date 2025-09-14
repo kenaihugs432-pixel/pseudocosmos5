@@ -39,7 +39,7 @@
     };
     const setMessage = m => document.getElementById('message').textContent = m;
 
-    // HEAD check do GLB
+    // quick HEAD check do GLB
     try {
       const head = await fetch('aha2.glb', { method: 'HEAD' });
       if (!head.ok) { showError('aha2.glb não encontrado (HTTP ' + head.status + ')'); setMessage('aha2.glb não encontrado. Abra fallback.'); return; }
@@ -62,6 +62,7 @@
     const { GLTFLoader } = GLTFLoaderModule;
     const { ARButton } = ARButtonModule;
 
+    // detectar export do SkeletonUtils de forma robusta:
     let SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
     if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) {
       console.warn('SkeletonUtils não exportado na forma esperada — fallback para clone simples (isso pode impedir animações skinned em alguns modelos).');
@@ -73,6 +74,7 @@
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
+    // compat APIs antigas/novas
     if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
     else if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
     if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
@@ -113,6 +115,7 @@
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
+    // variável que guarda o modelo colocado (garante apenas 1)
     let placedModel = null;
 
     loader.load('aha2.glb', (gltf) => {
@@ -156,6 +159,7 @@
     }
 
     if (isIOS()) {
+      // cria link que abre Quick Look (iOS)
       const arLink = document.createElement('a');
       arLink.href = usdzUrl;
       arLink.setAttribute('rel', 'ar');
@@ -171,9 +175,10 @@
       arLink.textContent = 'Abrir AR (iOS Quick Look)';
       document.body.appendChild(arLink);
 
+      // opcional: mini-preview com model-viewer (clicável também)
       const mv = document.createElement('model-viewer');
-      mv.setAttribute('src', 'aha2.glb');
-      mv.setAttribute('ios-src', usdzUrl);
+      mv.setAttribute('src', 'aha2.glb');    // mantém seu GLB para preview web
+      mv.setAttribute('ios-src', usdzUrl);  // fonte para Quick Look
       mv.setAttribute('ar', '');
       mv.setAttribute('ar-modes', 'webxr quick-look scene-viewer');
       mv.setAttribute('style', 'position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
@@ -182,6 +187,7 @@
 
       setMessage('iOS detectado — toque "Abrir AR (iOS Quick Look)" para ver em AR nativo.');
     } else {
+      // comportamento atual para WebXR (Android / navegadores com suporte)
       try { document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })); }
       catch(e) { showError('Erro criando botão AR: ' + e); }
     }
@@ -190,43 +196,57 @@
     const mixers = [];
     const clock = new THREE.Clock();
 
-    // controller (aplica posição/rot no clone)
+    // controller: agora com ancoragem fixa ao mundo (não segue a câmera)
     const controller = renderer.xr.getController(0);
     controller.addEventListener('select', () => {
       if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
       if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
 
       try {
+        // Se já existe um modelo colocado, ignoramos novos posicionamentos
         if (placedModel) {
-          // reposiciona/rotaciona existente
-          placedModel.position.setFromMatrixPosition(reticle.matrix);
-          placedModel.quaternion.setFromRotationMatrix(reticle.matrix);
-          console.log('Modelo existente reposicionado.');
+          console.log('Modelo já colocado — ignorando novo posicionamento.');
           return;
         }
 
         // clona o prototype (ou faz fallback)
         const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
 
-        // ---------- AQUI FORÇAMOS a escala do modelo final ----------
-        // usar setScalar substitui qualquer escala herdada, garantindo resultado previsível
+        // garante escala desejada (opcional)
         clone.scale.setScalar(MODEL_SCALE);
-        // atualiza matrizes para garantir que a escala seja aplicada antes de posicionar
-        clone.updateMatrix();
+
+        // Criar um "anchor" fixo no momento da colocação.
+        // Copiamos a transform do reticle (que está em world space) para esse anchor,
+        // adicionamos o anchor à cena e parentamos o clone ao anchor. Assim o clone
+        // fica fixo no mundo, mesmo que o reticle/controller continuem se movendo.
+        const anchor = new THREE.Object3D();
+        anchor.position.setFromMatrixPosition(reticle.matrix);
+        anchor.quaternion.setFromRotationMatrix(reticle.matrix);
+        anchor.scale.setFromMatrixScale(reticle.matrix);
+        scene.add(anchor);
+
+        // adiciona o clone ao anchor (anchor é estático)
+        anchor.add(clone);
+
+        // atualiza matrizes para garantir transformações corretas
+        anchor.updateMatrixWorld(true);
         clone.updateMatrixWorld(true);
-        console.log('Aplicada scale ao clone:', clone.scale);
 
-        clone.position.setFromMatrixPosition(reticle.matrix);
-        clone.quaternion.setFromRotationMatrix(reticle.matrix);
-        scene.add(clone);
+        // guarda referência (clone é filho do anchor)
         placedModel = clone;
+        placedModel.userData.anchor = anchor;
 
+        console.log('Modelo colocado e ancorado ao mundo. Parent do clone:', clone.parent);
+
+        // animações (se houver)
         if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
           const m = new THREE.AnimationMixer(clone);
           baseGLTF.animations.forEach(clip => m.clipAction(clip).play());
           mixers.push(m);
           console.log('Clone adicionado e animação iniciada (mixers=', mixers.length, ')');
-        } else console.log('Clone adicionado (sem animações).');
+        } else {
+          console.log('Clone adicionado (sem animações).');
+        }
       } catch (e) {
         showError('Falha ao clonar/colocar modelo: ' + e);
       }
