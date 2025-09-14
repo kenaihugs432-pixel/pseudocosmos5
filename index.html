@@ -19,6 +19,7 @@
   }
   </script>
 
+  <!-- model-viewer: usado como preview e para abrir Quick Look no iOS -->
   <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
 </head>
 <body>
@@ -27,10 +28,6 @@
 
   <script type="module">
   (async () => {
-    // --------- ajuste rápido: mude aqui para aumentar/diminuir o modelo ----------
-    const MODEL_SCALE = 2.0; // 1 = original, 2 = 2x, etc.
-    // --------------------------------------------------------------------------
-
     const showError = txt => {
       const box = document.getElementById('errorBox');
       box.style.display = 'block';
@@ -115,16 +112,15 @@
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
+    // removido: previewCreated
+
     // variável que guarda o modelo colocado (garante apenas 1)
     let placedModel = null;
 
     loader.load('aha2.glb', (gltf) => {
       baseGLTF = gltf;
       modelPrototype = gltf.scene;
-
-      // Opcional: garantir escala base 1 (evita surpresas)
-      modelPrototype.scale.setScalar(1.0);
-      modelPrototype.updateMatrixWorld(true);
+      modelPrototype.scale.set(0.5,0.5,0.5);
 
       // safe material fallbacks pra debug/visibilidade
       modelPrototype.traverse(n => {
@@ -146,11 +142,14 @@
       console.log('Modelo carregado — animações:', gltf.animations.length, gltf.animations.map(a=>a.name));
       modelReady = true;
       setMessage('Modelo carregado. Clique em "START AR" para dar início à realidade aumentada. Aponte a câmera para o anel verde e toque para posicionar.');
+
+      // OBS: preview automático removido — agora o modelo só aparece quando você tocar no reticle
     }, undefined, (err) => {
       showError('Erro carregando aha2.glb: ' + err);
     });
 
     // AR button / iOS Quick Look fallback
+    // assume aha2.usdz está no mesmo diretório do index.html; ajuste se necessário
     const usdzUrl = new URL('aha2.usdz', location.href).href;
 
     function isIOS() {
@@ -196,57 +195,33 @@
     const mixers = [];
     const clock = new THREE.Clock();
 
-    // controller: agora com ancoragem fixa ao mundo (não segue a câmera)
+    // handler seletor (apenas quando modelReady)
     const controller = renderer.xr.getController(0);
     controller.addEventListener('select', () => {
       if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
       if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
 
       try {
-        // Se já existe um modelo colocado, ignoramos novos posicionamentos
         if (placedModel) {
-          console.log('Modelo já colocado — ignorando novo posicionamento.');
+          // já existe um modelo colocado: apenas reposiciona/rotaciona
+          placedModel.position.setFromMatrixPosition(reticle.matrix);
+          placedModel.quaternion.setFromRotationMatrix(reticle.matrix);
+          console.log('Modelo existente reposicionado.');
           return;
         }
 
-        // clona o prototype (ou faz fallback)
         const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
+        clone.position.setFromMatrixPosition(reticle.matrix);
+        clone.quaternion.setFromRotationMatrix(reticle.matrix);
+        scene.add(clone);
+        placedModel = clone; // guarda a referência — garante apenas 1 instância
 
-        // garante escala desejada (opcional)
-        clone.scale.setScalar(MODEL_SCALE);
-
-        // Criar um "anchor" fixo no momento da colocação.
-        // Copiamos a transform do reticle (que está em world space) para esse anchor,
-        // adicionamos o anchor à cena e parentamos o clone ao anchor. Assim o clone
-        // fica fixo no mundo, mesmo que o reticle/controller continuem se movendo.
-        const anchor = new THREE.Object3D();
-        anchor.position.setFromMatrixPosition(reticle.matrix);
-        anchor.quaternion.setFromRotationMatrix(reticle.matrix);
-        anchor.scale.setFromMatrixScale(reticle.matrix);
-        scene.add(anchor);
-
-        // adiciona o clone ao anchor (anchor é estático)
-        anchor.add(clone);
-
-        // atualiza matrizes para garantir transformações corretas
-        anchor.updateMatrixWorld(true);
-        clone.updateMatrixWorld(true);
-
-        // guarda referência (clone é filho do anchor)
-        placedModel = clone;
-        placedModel.userData.anchor = anchor;
-
-        console.log('Modelo colocado e ancorado ao mundo. Parent do clone:', clone.parent);
-
-        // animações (se houver)
         if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
           const m = new THREE.AnimationMixer(clone);
           baseGLTF.animations.forEach(clip => m.clipAction(clip).play());
           mixers.push(m);
           console.log('Clone adicionado e animação iniciada (mixers=', mixers.length, ')');
-        } else {
-          console.log('Clone adicionado (sem animações).');
-        }
+        } else console.log('Clone adicionado (sem animações).');
       } catch (e) {
         showError('Falha ao clonar/colocar modelo: ' + e);
       }
