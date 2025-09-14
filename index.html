@@ -19,7 +19,6 @@
   }
   </script>
 
-  <!-- model-viewer: usado como preview e para abrir Quick Look no iOS -->
   <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
 </head>
 <body>
@@ -28,6 +27,10 @@
 
   <script type="module">
   (async () => {
+    // --------- ajuste rápido: mude aqui para aumentar/diminuir o modelo ----------
+    const MODEL_SCALE = 2.0; // 1 = original, 2 = 2x, etc.
+    // --------------------------------------------------------------------------
+
     const showError = txt => {
       const box = document.getElementById('errorBox');
       box.style.display = 'block';
@@ -36,7 +39,7 @@
     };
     const setMessage = m => document.getElementById('message').textContent = m;
 
-    // quick HEAD check do GLB
+    // HEAD check do GLB
     try {
       const head = await fetch('aha2.glb', { method: 'HEAD' });
       if (!head.ok) { showError('aha2.glb não encontrado (HTTP ' + head.status + ')'); setMessage('aha2.glb não encontrado. Abra fallback.'); return; }
@@ -59,7 +62,6 @@
     const { GLTFLoader } = GLTFLoaderModule;
     const { ARButton } = ARButtonModule;
 
-    // detectar export do SkeletonUtils de forma robusta:
     let SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
     if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) {
       console.warn('SkeletonUtils não exportado na forma esperada — fallback para clone simples (isso pode impedir animações skinned em alguns modelos).');
@@ -71,7 +73,6 @@
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
-    // compat APIs antigas/novas
     if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
     else if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
     if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
@@ -112,15 +113,15 @@
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
-    // removido: previewCreated
-
-    // variável que guarda o modelo colocado (garante apenas 1)
     let placedModel = null;
 
     loader.load('aha2.glb', (gltf) => {
       baseGLTF = gltf;
       modelPrototype = gltf.scene;
-      modelPrototype.scale.set(3,3,3);
+
+      // Opcional: garantir escala base 1 (evita surpresas)
+      modelPrototype.scale.setScalar(1.0);
+      modelPrototype.updateMatrixWorld(true);
 
       // safe material fallbacks pra debug/visibilidade
       modelPrototype.traverse(n => {
@@ -142,14 +143,11 @@
       console.log('Modelo carregado — animações:', gltf.animations.length, gltf.animations.map(a=>a.name));
       modelReady = true;
       setMessage('Modelo carregado. Clique em "START AR" para dar início à realidade aumentada. Aponte a câmera para o anel verde e toque para posicionar.');
-
-      // OBS: preview automático removido — agora o modelo só aparece quando você tocar no reticle
     }, undefined, (err) => {
       showError('Erro carregando aha2.glb: ' + err);
     });
 
     // AR button / iOS Quick Look fallback
-    // assume aha2.usdz está no mesmo diretório do index.html; ajuste se necessário
     const usdzUrl = new URL('aha2.usdz', location.href).href;
 
     function isIOS() {
@@ -158,7 +156,6 @@
     }
 
     if (isIOS()) {
-      // cria link que abre Quick Look (iOS)
       const arLink = document.createElement('a');
       arLink.href = usdzUrl;
       arLink.setAttribute('rel', 'ar');
@@ -174,10 +171,9 @@
       arLink.textContent = 'Abrir AR (iOS Quick Look)';
       document.body.appendChild(arLink);
 
-      // opcional: mini-preview com model-viewer (clicável também)
       const mv = document.createElement('model-viewer');
-      mv.setAttribute('src', 'aha2.glb');    // mantém seu GLB para preview web
-      mv.setAttribute('ios-src', usdzUrl);  // fonte para Quick Look
+      mv.setAttribute('src', 'aha2.glb');
+      mv.setAttribute('ios-src', usdzUrl);
       mv.setAttribute('ar', '');
       mv.setAttribute('ar-modes', 'webxr quick-look scene-viewer');
       mv.setAttribute('style', 'position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
@@ -186,7 +182,6 @@
 
       setMessage('iOS detectado — toque "Abrir AR (iOS Quick Look)" para ver em AR nativo.');
     } else {
-      // comportamento atual para WebXR (Android / navegadores com suporte)
       try { document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })); }
       catch(e) { showError('Erro criando botão AR: ' + e); }
     }
@@ -195,7 +190,7 @@
     const mixers = [];
     const clock = new THREE.Clock();
 
-    // handler seletor (apenas quando modelReady)
+    // controller (aplica posição/rot no clone)
     const controller = renderer.xr.getController(0);
     controller.addEventListener('select', () => {
       if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
@@ -203,18 +198,28 @@
 
       try {
         if (placedModel) {
-          // já existe um modelo colocado: apenas reposiciona/rotaciona
+          // reposiciona/rotaciona existente
           placedModel.position.setFromMatrixPosition(reticle.matrix);
           placedModel.quaternion.setFromRotationMatrix(reticle.matrix);
           console.log('Modelo existente reposicionado.');
           return;
         }
 
+        // clona o prototype (ou faz fallback)
         const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
+
+        // ---------- AQUI FORÇAMOS a escala do modelo final ----------
+        // usar setScalar substitui qualquer escala herdada, garantindo resultado previsível
+        clone.scale.setScalar(MODEL_SCALE);
+        // atualiza matrizes para garantir que a escala seja aplicada antes de posicionar
+        clone.updateMatrix();
+        clone.updateMatrixWorld(true);
+        console.log('Aplicada scale ao clone:', clone.scale);
+
         clone.position.setFromMatrixPosition(reticle.matrix);
         clone.quaternion.setFromRotationMatrix(reticle.matrix);
         scene.add(clone);
-        placedModel = clone; // guarda a referência — garante apenas 1 instância
+        placedModel = clone;
 
         if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
           const m = new THREE.AnimationMixer(clone);
