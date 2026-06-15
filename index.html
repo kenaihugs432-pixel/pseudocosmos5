@@ -13,6 +13,7 @@
       background:#000;
       color:#fff;
     }
+
     #message{
       position:fixed;
       left:10px;
@@ -25,6 +26,7 @@
       box-shadow:0 2px 10px rgba(0,0,0,.2);
       max-width:calc(100% - 24px);
     }
+
     #errorBox{
       position:fixed;
       left:10px;
@@ -162,15 +164,15 @@
     let modelPrototype = null;
     let modelReady = false;
     let placedModel = null;
+    let placedAnchor = null;
 
-    const MODEL_SCALE = 0.6; // ajuste fino aqui se quiser um pouco maior/menor
+    const MODEL_SCALE = 0.28;
 
     loader.load(
       'aha2.glb',
       (gltf) => {
         baseGLTF = gltf;
         modelPrototype = gltf.scene;
-
         modelPrototype.scale.setScalar(MODEL_SCALE);
 
         modelPrototype.traverse((n) => {
@@ -181,7 +183,7 @@
         });
 
         modelReady = true;
-        setMessage('Modelo carregado. Toque no chão para posicionar.');
+        setMessage('Modelo carregado. Toque em uma superfície para posicionar.');
       },
       undefined,
       (err) => {
@@ -237,45 +239,66 @@
 
     const mixers = [];
     const clock = new THREE.Clock();
-
     const controller = renderer.xr.getController(0);
     scene.add(controller);
 
-    controller.addEventListener('select', () => {
+    let latestHitResult = null;
+    const tmpMatrix = new THREE.Matrix4();
+
+    controller.addEventListener('select', async () => {
       if (!modelReady) {
         setMessage('Modelo ainda carregando.');
         return;
       }
 
-      if (!reticle.visible) {
-        setMessage('Aponte para uma superfície até o anel aparecer.');
+      if (!latestHitResult || placedModel || placedAnchor) {
         return;
       }
-
-      // coloca uma única vez e não atualiza mais a posição depois disso
-      if (placedModel) return;
 
       const clone = SkeletonUtils && typeof SkeletonUtils.clone === 'function'
         ? SkeletonUtils.clone(modelPrototype)
         : modelPrototype.clone(true);
 
       clone.scale.setScalar(MODEL_SCALE);
-      clone.position.setFromMatrixPosition(reticle.matrix);
-      clone.quaternion.setFromRotationMatrix(reticle.matrix);
-
       scene.add(clone);
       placedModel = clone;
+
+      const session = renderer.xr.getSession();
+
+      try {
+        if (session && typeof latestHitResult.createAnchor === 'function') {
+          placedAnchor = await latestHitResult.createAnchor();
+          setMessage('Modelo ancorado no mundo real.');
+        } else {
+          const ref = renderer.xr.getReferenceSpace();
+          const pose = latestHitResult.getPose(ref);
+          if (pose) {
+            tmpMatrix.fromArray(pose.transform.matrix);
+            clone.matrix.copy(tmpMatrix);
+            clone.matrix.decompose(clone.position, clone.quaternion, clone.scale);
+            clone.matrixAutoUpdate = false;
+          }
+          setMessage('Modelo posicionado.');
+        }
+      } catch (e) {
+        console.warn('Anchor falhou, usando posicionamento fixo:', e);
+        const ref = renderer.xr.getReferenceSpace();
+        const pose = latestHitResult.getPose(ref);
+        if (pose) {
+          tmpMatrix.fromArray(pose.transform.matrix);
+          clone.matrix.copy(tmpMatrix);
+          clone.matrix.decompose(clone.position, clone.quaternion, clone.scale);
+          clone.matrixAutoUpdate = false;
+        }
+        setMessage('Modelo posicionado.');
+      }
 
       if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
         const mixer = new THREE.AnimationMixer(clone);
         baseGLTF.animations.forEach((clip) => mixer.clipAction(clip).play());
         mixers.push(mixer);
       }
-
-      setMessage('Modelo posicionado.');
     });
-
-    const tmp = new THREE.Matrix4();
 
     renderer.setAnimationLoop((_, frame) => {
       const delta = clock.getDelta();
@@ -298,16 +321,33 @@
         if (ht && referenceSpace) {
           const results = frame.getHitTestResults(ht);
           if (results.length > 0) {
-            const pose = results[0].getPose(referenceSpace);
+            latestHitResult = results[0];
+
+            const pose = latestHitResult.getPose(referenceSpace);
             if (pose) {
-              tmp.fromArray(pose.transform.matrix);
-              reticle.matrix.copy(tmp);
+              tmpMatrix.fromArray(pose.transform.matrix);
+              reticle.matrix.copy(tmpMatrix);
               reticle.visible = true;
             } else {
               reticle.visible = false;
             }
           } else {
+            latestHitResult = null;
             reticle.visible = false;
+          }
+        }
+
+        if (placedAnchor && placedModel && referenceSpace && typeof frame.getPose === 'function') {
+          try {
+            const anchorPose = frame.getPose(placedAnchor.anchorSpace, referenceSpace);
+            if (anchorPose) {
+              tmpMatrix.fromArray(anchorPose.transform.matrix);
+              placedModel.matrix.copy(tmpMatrix);
+              placedModel.matrix.decompose(placedModel.position, placedModel.quaternion, placedModel.scale);
+              placedModel.matrixAutoUpdate = false;
+            }
+          } catch (e) {
+            console.warn('Falha ao atualizar anchor:', e);
           }
         }
       }
