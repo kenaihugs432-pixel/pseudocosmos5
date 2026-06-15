@@ -1,558 +1,326 @@
 <!doctype html>
 <html lang="pt-BR">
-
 <head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AR com WebXR — fix</title>
 
-<meta charset="utf-8"/>
+  <style>
+    body{
+      margin:0;
+      overflow:hidden;
+      font-family:sans-serif;
+      background:#000;
+      color:#fff;
+    }
+    #message{
+      position:fixed;
+      left:10px;
+      top:10px;
+      z-index:20;
+      background:#fff;
+      color:#000;
+      padding:8px 10px;
+      border-radius:6px;
+      box-shadow:0 2px 10px rgba(0,0,0,.2);
+      max-width:calc(100% - 24px);
+    }
+    #errorBox{
+      position:fixed;
+      left:10px;
+      right:10px;
+      bottom:10px;
+      z-index:21;
+      display:none;
+      max-height:40vh;
+      overflow:auto;
+      background:rgba(0,0,0,.85);
+      color:#fff;
+      padding:10px;
+      border-radius:6px;
+      font-family:monospace;
+      font-size:13px;
+      white-space:pre-wrap;
+    }
+  </style>
 
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1"/>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.module.js",
+      "three/": "https://cdn.jsdelivr.net/npm/three@0.154.0/"
+    }
+  }
+  </script>
 
-<title>AR com WebXR</title>
-
-<style>
-
-body{
-margin:0;
-overflow:hidden;
-background:#000;
-font-family:sans-serif;
-color:#fff;
-}
-
-#message{
-position:fixed;
-top:10px;
-left:10px;
-z-index:20;
-
-background:#fff;
-color:#000;
-
-padding:8px;
-
-border-radius:6px;
-
-box-shadow:
-0 2px 10px rgba(0,0,0,.2);
-}
-
-#errorBox{
-position:fixed;
-
-left:10px;
-right:10px;
-bottom:10px;
-
-display:none;
-
-z-index:21;
-
-padding:10px;
-
-background:
-rgba(0,0,0,.85);
-
-color:#fff;
-
-border-radius:6px;
-
-overflow:auto;
-
-max-height:40vh;
-
-font-size:13px;
-
-font-family:monospace;
-}
-
-</style>
-
-
-<script type="importmap">
-{
-"imports":{
-
-"three":
-"https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.module.js",
-
-"three/":
-"https://cdn.jsdelivr.net/npm/three@0.154.0/"
-
-}
-}
-</script>
-
-<script
-type="module"
-src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js">
-</script>
-
+  <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
 </head>
-
 <body>
-
-<div id="message">
-Iniciando…
-</div>
-
-<div id="errorBox"></div>
-
-<script type="module">
-
-(async()=>{
-
-const showError=(t)=>{
-const b=document.getElementById("errorBox");
-b.style.display="block";
-b.textContent+=t+"\n\n";
-};
-
-const setMessage=
-m=>
-document.getElementById("message")
-.textContent=m;
-
-
-const THREE=
-await import("three");
-
-const {GLTFLoader}=
-await import(
-"https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/loaders/GLTFLoader.js"
-);
-
-const {ARButton}=
-await import(
-"https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/webxr/ARButton.js"
-);
-
-const SkeletonUtilsModule=
-await import(
-"https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/utils/SkeletonUtils.js"
-);
-
-const SkeletonUtils=
-SkeletonUtilsModule.default
-||
-SkeletonUtilsModule;
-
-
-
-const renderer=
-new THREE.WebGLRenderer({
-antialias:true,
-alpha:true
-});
-
-renderer.setPixelRatio(
-window.devicePixelRatio
-);
-
-renderer.setSize(
-window.innerWidth,
-window.innerHeight
-);
-
-renderer.xr.enabled=true;
-
-renderer.outputColorSpace=
-THREE.SRGBColorSpace;
-
-renderer.toneMapping=
-THREE.ACESFilmicToneMapping;
-
-document.body.appendChild(
-renderer.domElement
-);
-
-
-
-const scene=
-new THREE.Scene();
-
-scene.matrixAutoUpdate=true;
-
-
-
-const camera=
-new THREE.PerspectiveCamera(
-70,
-window.innerWidth/window.innerHeight,
-0.01,
-50
-);
-
-
-
-scene.add(
-new THREE.AmbientLight(
-0xffffff,
-1.2
-)
-);
-
-
-
-const dir=
-new THREE.DirectionalLight(
-0xffffff,
-1
-);
-
-dir.position.set(
-1,
-2,
-1
-);
-
-scene.add(dir);
-
-
-
-const reticle=
-new THREE.Mesh(
-
-new THREE.RingGeometry(
-0.07,
-0.09,
-32
-).rotateX(
--Math.PI/2
-),
-
-new THREE.MeshBasicMaterial({
-color:0x00ff88
-})
-
-);
-
-reticle.visible=false;
-
-reticle.matrixAutoUpdate=false;
-
-scene.add(
-reticle
-);
-
-
-
-const loader=
-new GLTFLoader();
-
-let baseGLTF;
-
-let modelPrototype;
-
-let modelReady=false;
-
-let placedModel=null;
-
-
-
-loader.load(
-
-"aha2.glb",
-
-(gltf)=>{
-
-baseGLTF=gltf;
-
-modelPrototype=
-gltf.scene;
-
-
-// MAIOR
-modelPrototype.scale.set(
-1.8,
-1.8,
-1.8
-);
-
-modelReady=true;
-
-setMessage(
-"Aponte para o chão e toque para posicionar."
-);
-
-},
-
-undefined,
-
-e=>showError(e)
-
-);
-
-
-
-document.body.appendChild(
-
-ARButton.createButton(
-
-renderer,
-
-{
-requiredFeatures:
-["hit-test"],
-
-optionalFeatures:
-["local-floor"]
-}
-
-)
-
-);
-
-
-
-const mixers=[];
-
-const clock=
-new THREE.Clock();
-
-
-
-const controller=
-renderer.xr.getController(
-0
-);
-
-scene.add(
-controller
-);
-
-
-
-controller.addEventListener(
-
-"select",
-
-()=>{
-
-if(
-!modelReady
-||
-!reticle.visible
-)
-return;
-
-
-
-if(
-placedModel
-){
-
-placedModel.position
-.setFromMatrixPosition(
-reticle.matrix
-);
-
-return;
-
-}
-
-
-
-const clone=
-SkeletonUtils.clone(
-modelPrototype
-);
-
-
-
-clone.position
-.setFromMatrixPosition(
-reticle.matrix
-);
-
-
-// NÃO seguir câmera
-clone.rotation.set(
-0,
-0,
-0
-);
-
-
-// manter escala
-clone.scale.copy(
-modelPrototype.scale
-);
-
-
-
-scene.add(
-clone
-);
-
-placedModel=
-clone;
-
-
-
-if(
-baseGLTF.animations
-){
-
-const mixer=
-new THREE.AnimationMixer(
-clone
-);
-
-baseGLTF.animations.forEach(
-a=>
-mixer
-.clipAction(a)
-.play()
-);
-
-mixers.push(
-mixer
-);
-
-}
-
-}
-
-);
-
-
-
-const temp=
-new THREE.Matrix4();
-
-
-
-renderer.setAnimationLoop(
-
-(_,frame)=>{
-
-mixers.forEach(
-m=>
-m.update(
-clock.getDelta()
-)
-);
-
-
-
-if(frame){
-
-const session=
-renderer.xr.getSession();
-
-const ref=
-renderer.xr.getReferenceSpace();
-
-
-
-if(
-session
-&&
-!session.hit
-){
-
-session.hit=true;
-
-session
-.requestReferenceSpace(
-"viewer"
-)
-
-.then(
-
-vs=>
-
-session
-.requestHitTestSource({
-space:vs
-})
-
-.then(
-h=>
-session.ht=h
-)
-
-);
-
-}
-
-
-
-if(
-session?.ht
-){
-
-const hits=
-frame.getHitTestResults(
-session.ht
-);
-
-
-
-if(
-hits.length
-){
-
-temp.fromArray(
-
-hits[0]
-.getPose(ref)
-.transform
-.matrix
-
-);
-
-reticle.matrix.copy(
-temp
-);
-
-reticle.visible=true;
-
-}
-
-}
-
-}
-
-
-
-renderer.render(
-scene,
-camera
-);
-
-}
-
-);
-
-
-
-window.addEventListener(
-
-"resize",
-
-()=>{
-
-camera.aspect=
-window.innerWidth/
-window.innerHeight;
-
-camera.updateProjectionMatrix();
-
-renderer.setSize(
-window.innerWidth,
-window.innerHeight
-);
-
-}
-
-);
-
-})();
-
-</script>
-
+  <div id="message">Iniciando…</div>
+  <div id="errorBox"></div>
+
+  <script type="module">
+  (async () => {
+    const showError = (txt) => {
+      const box = document.getElementById('errorBox');
+      box.style.display = 'block';
+      box.textContent += txt + "\n\n";
+      console.error(txt);
+    };
+
+    const setMessage = (m) => {
+      document.getElementById('message').textContent = m;
+    };
+
+    try {
+      const head = await fetch('aha2.glb', { method: 'HEAD' });
+      if (!head.ok) {
+        showError('aha2.glb não encontrado (HTTP ' + head.status + ')');
+        setMessage('aha2.glb não encontrado. Abra o fallback.');
+        return;
+      }
+    } catch (e) {
+      showError('Erro checando aha2.glb: ' + e);
+      return;
+    }
+
+    let THREE, GLTFLoaderModule, ARButtonModule, SkeletonUtilsModule;
+    try {
+      THREE = await import('three');
+      GLTFLoaderModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/loaders/GLTFLoader.js');
+      ARButtonModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/webxr/ARButton.js');
+      SkeletonUtilsModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/utils/SkeletonUtils.js');
+    } catch (err) {
+      showError('Falha ao carregar libs: ' + err);
+      setMessage('Erro carregando libs. Abra o fallback.');
+      return;
+    }
+
+    const { GLTFLoader } = GLTFLoaderModule;
+    const { ARButton } = ARButtonModule;
+    const SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+
+    if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) {
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+    } else if ('outputEncoding' in renderer) {
+      renderer.outputEncoding = THREE.sRGBEncoding;
+    }
+
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.2;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(
+      70,
+      window.innerWidth / window.innerHeight,
+      0.01,
+      50
+    );
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1.15));
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.7));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(1, 2, 1);
+    scene.add(dir);
+
+    const reticle = new THREE.Mesh(
+      new THREE.RingGeometry(0.06, 0.08, 32).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0x00ff88 })
+    );
+    reticle.visible = false;
+    reticle.matrixAutoUpdate = false;
+    scene.add(reticle);
+
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+    try {
+      const tl = new THREE.TextureLoader();
+      const envUrl = 'https://threejs.org/examples/textures/2294472375_24a3b8ef46_o.jpg';
+      const envTex = await new Promise((res, rej) => tl.load(envUrl, res, undefined, rej));
+      envTex.mapping = THREE.EquirectangularReflectionMapping;
+      if ('colorSpace' in envTex && THREE.SRGBColorSpace) {
+        envTex.colorSpace = THREE.SRGBColorSpace;
+      } else if ('encoding' in envTex) {
+        envTex.encoding = THREE.sRGBEncoding;
+      }
+      scene.environment = pmrem.fromEquirectangular(envTex).texture;
+      envTex.dispose();
+      pmrem.dispose();
+    } catch (e) {
+      console.warn('Env falhou (não crítico):', e);
+    }
+
+    const loader = new GLTFLoader();
+    let baseGLTF = null;
+    let modelPrototype = null;
+    let modelReady = false;
+    let placedModel = null;
+
+    const MODEL_SCALE = 0.6; // ajuste fino aqui se quiser um pouco maior/menor
+
+    loader.load(
+      'aha2.glb',
+      (gltf) => {
+        baseGLTF = gltf;
+        modelPrototype = gltf.scene;
+
+        modelPrototype.scale.setScalar(MODEL_SCALE);
+
+        modelPrototype.traverse((n) => {
+          if (n.isMesh && n.material) {
+            n.material.side = THREE.DoubleSide;
+            n.material.needsUpdate = true;
+          }
+        });
+
+        modelReady = true;
+        setMessage('Modelo carregado. Toque no chão para posicionar.');
+      },
+      undefined,
+      (err) => {
+        showError('Erro carregando aha2.glb: ' + err);
+      }
+    );
+
+    const usdzUrl = new URL('aha2.usdz', location.href).href;
+
+    function isIOS() {
+      return /iP(hone|od|ad)/.test(navigator.platform)
+        || (navigator.userAgent.includes('Mac') && 'ontouchend' in document);
+    }
+
+    if (isIOS()) {
+      const arLink = document.createElement('a');
+      arLink.href = usdzUrl;
+      arLink.setAttribute('rel', 'ar');
+      arLink.style.position = 'fixed';
+      arLink.style.left = '10px';
+      arLink.style.bottom = '10px';
+      arLink.style.zIndex = '40';
+      arLink.style.padding = '10px 14px';
+      arLink.style.background = '#0b84ff';
+      arLink.style.color = '#fff';
+      arLink.style.borderRadius = '8px';
+      arLink.style.textDecoration = 'none';
+      arLink.textContent = 'Abrir AR (iOS Quick Look)';
+      document.body.appendChild(arLink);
+
+      const mv = document.createElement('model-viewer');
+      mv.setAttribute('src', 'aha2.glb');
+      mv.setAttribute('ios-src', usdzUrl);
+      mv.setAttribute('ar', '');
+      mv.setAttribute('ar-modes', 'webxr quick-look scene-viewer');
+      mv.setAttribute('camera-controls', '');
+      mv.setAttribute('style', 'position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
+      document.body.appendChild(mv);
+
+      setMessage('iOS detectado — toque em "Abrir AR (iOS Quick Look)".');
+    } else {
+      try {
+        document.body.appendChild(
+          ARButton.createButton(renderer, {
+            requiredFeatures: ['hit-test'],
+            optionalFeatures: ['local-floor']
+          })
+        );
+      } catch (e) {
+        showError('Erro criando botão AR: ' + e);
+      }
+    }
+
+    const mixers = [];
+    const clock = new THREE.Clock();
+
+    const controller = renderer.xr.getController(0);
+    scene.add(controller);
+
+    controller.addEventListener('select', () => {
+      if (!modelReady) {
+        setMessage('Modelo ainda carregando.');
+        return;
+      }
+
+      if (!reticle.visible) {
+        setMessage('Aponte para uma superfície até o anel aparecer.');
+        return;
+      }
+
+      // coloca uma única vez e não atualiza mais a posição depois disso
+      if (placedModel) return;
+
+      const clone = SkeletonUtils && typeof SkeletonUtils.clone === 'function'
+        ? SkeletonUtils.clone(modelPrototype)
+        : modelPrototype.clone(true);
+
+      clone.scale.setScalar(MODEL_SCALE);
+      clone.position.setFromMatrixPosition(reticle.matrix);
+      clone.quaternion.setFromRotationMatrix(reticle.matrix);
+
+      scene.add(clone);
+      placedModel = clone;
+
+      if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
+        const mixer = new THREE.AnimationMixer(clone);
+        baseGLTF.animations.forEach((clip) => mixer.clipAction(clip).play());
+        mixers.push(mixer);
+      }
+
+      setMessage('Modelo posicionado.');
+    });
+
+    const tmp = new THREE.Matrix4();
+
+    renderer.setAnimationLoop((_, frame) => {
+      const delta = clock.getDelta();
+      for (const mm of mixers) mm.update(delta);
+
+      if (frame) {
+        const session = renderer.xr.getSession();
+        const referenceSpace = renderer.xr.getReferenceSpace();
+
+        if (session && !session._hitTestSourceRequested) {
+          session._hitTestSourceRequested = true;
+          session.requestReferenceSpace('viewer').then((viewerSpace) => {
+            session.requestHitTestSource({ space: viewerSpace }).then((src) => {
+              session._hitTestSource = src;
+            }).catch((e) => console.warn('requestHitTestSource failed', e));
+          }).catch((e) => console.warn('requestReferenceSpace failed', e));
+        }
+
+        const ht = session && session._hitTestSource;
+        if (ht && referenceSpace) {
+          const results = frame.getHitTestResults(ht);
+          if (results.length > 0) {
+            const pose = results[0].getPose(referenceSpace);
+            if (pose) {
+              tmp.fromArray(pose.transform.matrix);
+              reticle.matrix.copy(tmp);
+              reticle.visible = true;
+            } else {
+              reticle.visible = false;
+            }
+          } else {
+            reticle.visible = false;
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  })();
+  </script>
 </body>
 </html>
